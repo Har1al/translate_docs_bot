@@ -8,144 +8,107 @@ env = Env()
 env.read_env()
 
 
-async def _spinner_edit(status_message, base_text="Отправляю запрос модели"):
 
+async def _spinner_edit(status_message, base_text="Отправляю запрос модели"):
     dots = 0
     try:
         while True:
             dots = (dots % 3) + 1
-            suffix = "." * dots
             try:
-                await status_message.edit_text(f"{base_text}{suffix}")
+                await status_message.edit_text(f"{base_text}{'.' * dots}")
             except Exception:
                 pass
             await asyncio.sleep(0.7)
     except asyncio.CancelledError:
-        # при отмене просто выходим
         raise
 
-def collect_texts(doc):
-
-    texts = []
-
-    for p in doc.paragraphs:
-        if p.text and p.text.strip():
-            texts.append(p.text)
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    if p.text and p.text.strip():
-                        texts.append(p.text)
-
-    for section in doc.sections:
-        hdr = section.header
-        for p in hdr.paragraphs:
-            if p.text and p.text.strip():
-                texts.append(p.text)
-        ftr = section.footer
-        for p in ftr.paragraphs:
-            if p.text and p.text.strip():
-                texts.append(p.text)
-
-    seen = set()
-    unique_texts = []
-    for t in texts:
-        if t not in seen:
-            seen.add(t)
-            unique_texts.append(t)
-    return unique_texts
 
 
-def copy_font_attributes(src_run, dst_run):
+def is_text_run(run):
+    """Run содержит текст, а не картинку"""
     try:
-        s = src_run.font
-        d = dst_run.font
-        if s.name: d.name = s.name
-        if s.size: d.size = s.size
-        if s.bold is not None: d.bold = s.bold
-        if s.italic is not None: d.italic = s.italic
-        if s.underline is not None: d.underline = s.underline
+        if run._element.xpath('.//w:drawing'):
+            return False
     except Exception:
         pass
+    return bool(run.text and run.text.strip())
 
-def replace_in_paragraph(par, mapping):
 
-    for run in par.runs:
-        try:
-            if run._element.xpath('.//w:drawing'):
-                return
-        except Exception:
-            pass
+def collect_texts(doc: Document):
+    texts = set()
 
-    full = par.text
+    def collect_from_paragraphs(paragraphs):
+        for p in paragraphs:
+            for r in p.runs:
+                if is_text_run(r):
+                    texts.add(r.text.strip())
 
-    if not full:
-        return
+    collect_from_paragraphs(doc.paragraphs)
 
-    new_full = full
-    for k, v in mapping.items():
-        if k and k in new_full:
-            new_full = new_full.replace(k, v)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                collect_from_paragraphs(cell.paragraphs)
 
-    if new_full == full:
-        return
+    for section in doc.sections:
+        collect_from_paragraphs(section.header.paragraphs)
+        collect_from_paragraphs(section.footer.paragraphs)
 
-    first_run = par.runs[0] if par.runs else None
+    return list(texts)
 
-    for r in list(par.runs):
-        try:
-            r._element.getparent().remove(r._element)
-        except Exception:
-            try:
-                r.text = ""
-            except Exception:
-                pass
 
-    newr = par.add_run(new_full)
-    if first_run is not None:
-        copy_font_attributes(first_run, newr)
 
-def process_document(doc, mapping):
+def replace_runs(paragraph, mapping):
+    for run in paragraph.runs:
+        if not is_text_run(run):
+            continue
+
+        original = run.text.strip()
+        if original in mapping:
+            run.text = mapping[original]
+
+
+def process_document(doc: Document, mapping: dict):
 
     for p in doc.paragraphs:
-        replace_in_paragraph(p, mapping)
+        replace_runs(p, mapping)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    replace_in_paragraph(p, mapping)
+                    replace_runs(p, mapping)
 
     for section in doc.sections:
-        hdr = section.header
-        for p in hdr.paragraphs:
-            replace_in_paragraph(p, mapping)
-        ftr = section.footer
-        for p in ftr.paragraphs:
-            replace_in_paragraph(p, mapping)
+        for p in section.header.paragraphs:
+            replace_runs(p, mapping)
+        for p in section.footer.paragraphs:
+            replace_runs(p, mapping)
+
+
 
 async def from_eng_to_rus_docx(path, message, save_path):
+
     doc = Document(path)
     texts = collect_texts(doc)
+
     if not texts:
-        await message.answer(text="В документе нет текстовых фрагментов для обработки.")
+        await message.answer("В документе нет текста для перевода.")
         return
 
-    await message.answer(text=f"Собрано {len(texts)} уникальных фрагментов для перевода / замены.")
+    await message.answer(f"Найдено {len(texts)} текстовых фрагментов для перевода.")
 
-    client = OpenAI(api_key=env('API_KEY'))
+    client = OpenAI(api_key=env("API_KEY"))
 
     status_msg = await message.answer("Отправляю запрос модели")
-    spinner_task = asyncio.create_task(_spinner_edit(status_msg, base_text="Отправляю запрос модели"))
+    spinner_task = asyncio.create_task(_spinner_edit(status_msg))
 
     try:
-        mapping = await asyncio.to_thread(call_model_for_translations, client, texts)
-
-        if not isinstance(mapping, dict):
-            await message.answer(text="Ответ модели не является словарём. Отбой.")
-            return
+        mapping = await asyncio.to_thread(
+            call_model_for_translations,
+            client,
+            texts
+        )
 
         spinner_task.cancel()
         try:
@@ -153,10 +116,16 @@ async def from_eng_to_rus_docx(path, message, save_path):
         except asyncio.CancelledError:
             pass
 
-        await status_msg.edit_text(f"✅ Получено {len(mapping)} пар 'оригинал -> перевод'.")
+        if not isinstance(mapping, dict):
+            await status_msg.edit_text("❌ Модель вернула некорректный ответ.")
+            return
+
+        await status_msg.edit_text(f"✅ Получено {len(mapping)} переводов.")
 
         process_document(doc, mapping)
         doc.save(save_path)
+
+        await message.answer("📄 Документ успешно переведён.")
 
     except Exception as e:
         spinner_task.cancel()
@@ -165,5 +134,4 @@ async def from_eng_to_rus_docx(path, message, save_path):
         except asyncio.CancelledError:
             pass
         await status_msg.edit_text("❌ Ошибка при обработке документа.")
-        print("[!] Ошибка from_eng_to_rus:", e)
-
+        print("[ERROR]", e)

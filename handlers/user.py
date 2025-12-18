@@ -5,6 +5,7 @@ from aiogram.types import FSInputFile
 from datetime import datetime
 from services.process_docx import from_eng_to_rus_docx
 from services.process_pdf import from_eng_to_rus_pdf
+from services.p2d import convert_pdf_to_docx, pdf_has_text
 import os
 
 user_router = Router()
@@ -62,10 +63,25 @@ async def process_docx_file(message):
 
         save_path = os.path.join('completed_docs', name)
 
-        await from_eng_to_rus_pdf(path, message, save_path)
+        if pdf_has_text(path):
+            d_name = f'{os.path.splitext(name)[0]}.docx'
+            d_path = os.path.join('downloads', d_name)
+            convert_pdf_to_docx(path, d_path)
 
-        await message.answer_document(
-            document=FSInputFile(save_path),
-        )
+            save_d_name = os.path.join('completed_docs', d_name)
+
+
+            await from_eng_to_rus_docx(d_path, message, save_d_name)
+
+            await message.answer_document(
+                document=FSInputFile(save_d_name),
+            )
+        else:
+
+            await from_eng_to_rus_pdf(path, message, save_path)
+
+            await message.answer_document(
+                document=FSInputFile(save_path),
+            )
     else:
         await message.answer(text=LEXICON_RU['other_answer'])

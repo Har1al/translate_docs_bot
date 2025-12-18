@@ -38,7 +38,9 @@ def call_model_for_translations(client, texts):
 
         m = re.search(r'\{.*\}', raw, flags=re.DOTALL)
         if not m:
-            raise RuntimeError("Не удалось извлечь JSON из ответа модели. Ответ:\n" + raw)
+            with open('test.json', 'w', encoding='utf-8') as file:
+                file.write(raw)
+            raise RuntimeError("Не удалось извлечь JSON из ответа модели. Ответ:\n")
         json_str = m.group(0)
 
         try:
